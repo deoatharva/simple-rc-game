@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Mini Racer - Circuit Loop</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #87ceeb; }
+    canvas { display: block; }
+    #hud {
+      position: absolute; top: 16px; left: 16px;
+      font: 16px/1.4 monospace; color: #fff;
+      text-shadow: 0 2px 4px rgba(0,0,0,.8);
+      pointer-events: none;
+      background: rgba(0,0,0,0.4);
+      padding: 12px; border-radius: 8px;
+    }
+    .warning { color: #ff4444; font-weight: bold; display: none; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div>Speed: <span id="speed">0</span> km/h</div>
+    <div>Lap Time: <span id="lap-time">0.00</span>s</div>
+    <div>Best Lap: <span id="best-time">--.--</span>s</div>
+    <div>Next Checkpoint: <span id="cp-count">Start Line</span></div>
+    <div id="offroad-warning" class="warning">OFF TRACK!</div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ---------- Renderer / Scene / Camera ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.Fog(0x87ceeb, 60, 200);
+
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 500);
+
+    // ---------- Lights ----------
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+    const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+    sun.position.set(30, 60, 20);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    const s = 80;
+    sun.shadow.camera.left = -s; sun.shadow.camera.right = s;
+    sun.shadow.camera.top = s;   sun.shadow.camera.bottom = -s;
+    sun.shadow.camera.far = 200;
+    scene.add(sun);
+
+    // ---------- Ground ----------
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(400, 400),
+      new THREE.MeshStandardMaterial({ color: 0x3a7d44 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // ---------- The Track ----------
+    const trackGroup = new THREE.Group();
+    scene.add(trackGroup);
+    
+    const trackSegments = []; 
+    const wallMeshes = []; 
+
+    const asphaltMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+    const lineMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    
+    // Red & White striped barrier materials
+    const wallMatRed = new THREE.MeshStandardMaterial({ color: 0xd62828 });
+    const wallMatWhite = new THREE.MeshStandardMaterial({ color: 0xffffff });
+
+    function addTrackSegment(x, z, width, length, rotationY = 0) {
+      // 1. Asphalt
+      const geo = new THREE.PlaneGeometry(width, length);
+      const mesh = new THREE.Mesh(geo, asphaltMat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.rotation.z = rotationY;
+      mesh.position.set(x, 0.02, z); 
+      mesh.receiveShadow = true;
+      trackGroup.add(mesh);
+
+      trackSegments.push({ x, z, width, length, rotation: rotationY });
+
+      // 2. Edge Lines
+      const lineGeo = new THREE.PlaneGeometry(0.4, length);
+      const leftLine = new THREE.Mesh(lineGeo, lineMat);
+      leftLine.rotation.x = -Math.PI / 2;
+      leftLine.rotation.z = rotationY;
+      leftLine.position.set(x + Math.cos(rotationY) * (width/2 - 0.2), 0.03, z - Math.sin(rotationY) * (width/2 - 0.2));
+      trackGroup.add(leftLine);
+
+      const rightLine = new THREE.Mesh(lineGeo, lineMat);
+      rightLine.rotation.x = -Math.PI / 2;
+      rightLine.rotation.z = rotationY;
+      rightLine.position.set(x - Math.cos(rotationY) * (width/2 - 0.2), 0.03, z + Math.sin(rotationY) * (width/2 - 0.2));
+      trackGroup.add(rightLine);
+
+      // 3. Striped Walls (Physics & Visuals)
+      const wallThickness = 0.6;
+      const wallHeight = 1.2;
+      const numStripes = Math.ceil(length / 4); // One stripe every 4 units
+      const stripeLength = length / numStripes;
+
+      const wallDefs = [
+        { offset: width / 2 + wallThickness / 2 },
+        { offset: -width / 2 - wallThickness / 2 }
+      ];
+
+      wallDefs.forEach(def => {
+        // Create a group for this wall side
+        const wallSideGroup = new THREE.Group();
+        wallSideGroup.rotation.y = rotationY;
+        
+        // Position the wall side relative to the track
+        const localX = def.offset;
+        wallSideGroup.position.set(
+          x + localX * Math.cos(rotationY),
+          wallHeight / 2,
+          z - localX * Math.sin(rotationY)
+        );
+        scene.add(wallSideGroup);
+
+        // Add alternating red/white stripes
+        for (let i = 0; i < numStripes; i++) {
+          const isRed = i % 2 === 0;
+          const stripeGeo = new THREE.BoxGeometry(wallThickness, wallHeight, stripeLength);
+          const stripe = new THREE.Mesh(stripeGeo, isRed ? wallMatRed : wallMatWhite);
+          
+          // Position stripe along the local Z axis of the wall
+          stripe.position.z = -length / 2 + (i * stripeLength) + (stripeLength / 2);
+          
+          stripe.castShadow = true;
+          stripe.receiveShadow = true;
+          wallSideGroup.add(stripe);
+        }
+
+        // Store a single large invisible box for collision physics (efficient)
+        const colGeo = new THREE.BoxGeometry(wallThickness, wallHeight, length);
+        const colBox = new THREE.Mesh(colGeo, new THREE.MeshBasicMaterial({visible: false}));
+        colBox.position.set(0, 0, 0);
+        wallSideGroup.add(colBox);
+        
+        wallSideGroup.updateMatrixWorld();
+        wallMeshes.push(colBox);
+      });
+    }
+
+    // Build a proper loop (No more crossroads!)
+    // Top straight
+    addTrackSegment(0, 30, 12, 80);  
+    // Bottom straight
+    addTrackSegment(0, -30, 12, 80); 
+    // Right straight
+    addTrackSegment(45, 0, 12, 60, Math.PI / 2);  
+    // Left straight
+    addTrackSegment(-45, 0, 12, 60, Math.PI / 2); 
+
+    // Add a visual Start/Finish Arch at the bottom straight
+    const archGroup = new THREE.Group();
+    const archMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+    const postGeo = new THREE.BoxGeometry(1, 6, 1);
+    const leftPost = new THREE.Mesh(postGeo, archMat);
+    leftPost.position.set(6, 3, -30);
+    const rightPost = new THREE.Mesh(postGeo, archMat);
+    rightPost.position.set(-6, 3, -30);
+    const topBar = new THREE.Mesh(new THREE.BoxGeometry(13, 1, 1), archMat);
+    topBar.position.set(0, 6, -30);
+    archGroup.add(leftPost, rightPost, topBar);
+    scene.add(archGroup);
+
+    // ---------- Checkpoints ----------
+    // Adjusted checkpoint positions for the new loop
+    const checkpoints = [
+      { x: 0, z: -30, r: 8 },   // Start/Finish
+      { x: 45, z: 30, r: 8 },   // Top-Right corner
+      { x: -45, z: 30, r: 8 },  // Top-Left corner
+      { x: -45, z: -30, r: 8 }  // Bottom-Left corner
+    ];
+
+    const cpVisuals = [];
+    checkpoints.forEach((cp, i) => {
+      const geo = new THREE.RingGeometry(cp.r - 1, cp.r, 32);
+      const mat = new THREE.MeshBasicMaterial({ 
+        color: i === 0 ? 0xffaa00 : 0x00aaff, 
+        side: THREE.DoubleSide, 
+        transparent: true, 
+        opacity: 0.3 
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(cp.x, 0.05, cp.z);
+      scene.add(mesh);
+      cpVisuals.push(mesh);
+    });
+
+    // ---------- Car ----------
+    const car = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 3.2), new THREE.MeshStandardMaterial({ color: 0xe63946 }));
+    body.position.y = 0.6; body.castShadow = true; car.add(body);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.5, 1.6), new THREE.MeshStandardMaterial({ color: 0x222222 }));
+    cabin.position.set(0, 1.1, -0.2); cabin.castShadow = true; car.add(cabin);
+
+    const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.3, 16);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    [[ 0.85, 0.35, 1.0], [-0.85, 0.35, 1.0], [ 0.85, 0.35, -1.0], [-0.85, 0.35, -1.0]].forEach(([x, y, z]) => {
+      const w = new THREE.Mesh(wheelGeo, wheelMat);
+      w.rotation.z = Math.PI / 2; w.position.set(x, y, z); w.castShadow = true; car.add(w);
+    });
+
+    car.position.set(0, 0, -30);
+    scene.add(car);
+
+    // ---------- Input ----------
+    const keys = {};
+    addEventListener('keydown', e => keys[e.code] = true);
+    addEventListener('keyup',   e => keys[e.code] = false);
+
+    // ---------- Game State ----------
+    const physics = {
+      position: new THREE.Vector3(0, 0, -30),
+      heading: 0, speed: 0, isOffroad: false,
+    };
+
+    let currentCheckpoint = 1; 
+    let hasStartedLap = false; 
+    let lapStartTime = performance.now();
+    let bestLapTime = null;
+    let currentLapTime = 0;
+
+    const BASE_MAX_SPEED     = 45; // Buffed speed slightly since track is bigger
+    const OFFROAD_MAX_SPEED  = 15; 
+    const REVERSE_SPEED      = 12;
+    const ACCEL              = 30;
+    const OFFROAD_ACCEL      = 15;
+    const BRAKE              = 50;
+    const DRAG               = 6;
+    const TURN_RATE          = 2.2;
+
+    // ---------- Collision & Surface Detection ----------
+    function checkOffroad(pos) {
+      const margin = 0.5;
+      for (const seg of trackSegments) {
+        const dx = pos.x - seg.x;
+        const dz = pos.z - seg.z;
+        const cos = Math.cos(-seg.rotation);
+        const sin = Math.sin(-seg.rotation);
+        const localX = dx * cos - dz * sin;
+        const localZ = dx * sin + dz * cos;
+        if (Math.abs(localX) <= (seg.width / 2) + margin && Math.abs(localZ) <= (seg.length / 2) + margin) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    const carRadius = 1.5;
+    function resolveWallCollisions() {
+      let collided = false;
+      for (const wall of wallMeshes) {
+        const carPos = physics.position;
+        const box = new THREE.Box3().setFromObject(wall);
+        const closest = box.clampPoint(carPos, new THREE.Vector3());
+        const dist = carPos.distanceTo(closest);
+        
+        if (dist < carRadius) {
+          collided = true;
+          const pushDir = carPos.clone().sub(closest).normalize();
+          if(pushDir.lengthSq() === 0) pushDir.set(0, 0, 1);
+          const overlap = carRadius - dist;
+          physics.position.addScaledVector(pushDir, overlap);
+          physics.speed *= 0.2; 
+        }
+      }
+      if (collided) car.position.copy(physics.position);
+    }
+
+    // ---------- Physics Update ----------
+    function updatePhysics(dt) {
+      const forward = keys['KeyW'] || keys['ArrowUp'];
+      const back    = keys['KeyS'] || keys['ArrowDown'];
+      const left    = keys['KeyA'] || keys['ArrowLeft'];
+      const right   = keys['KeyD'] || keys['ArrowRight'];
+      const brake   = keys['Space'];
+
+      physics.isOffroad = checkOffroad(physics.position);
+      const maxSpeed = physics.isOffroad ? OFFROAD_MAX_SPEED : BASE_MAX_SPEED;
+      const accel = physics.isOffroad ? OFFROAD_ACCEL : ACCEL;
+
+      if (forward) physics.speed += accel * dt;
+      else if (back) {
+        if (physics.speed > 0) physics.speed -= BRAKE * dt;
+        else physics.speed -= accel * 0.6 * dt;
+      }
+
+      if (brake) physics.speed -= Math.sign(physics.speed) * BRAKE * dt;
+      if (!forward && !back) {
+        const d = DRAG * dt;
+        if (Math.abs(physics.speed) <= d) physics.speed = 0;
+        else physics.speed -= Math.sign(physics.speed) * d;
+      }
+
+      physics.speed = THREE.MathUtils.clamp(physics.speed, -REVERSE_SPEED, maxSpeed);
+
+      const speedFactor = Math.min(Math.abs(physics.speed) / 6, 1);
+      const highSpeedDamp = 1 - Math.min(Math.abs(physics.speed) / BASE_MAX_SPEED, 1) * 0.5;
+      if (left)  physics.heading += TURN_RATE * speedFactor * highSpeedDamp * dt * Math.sign(physics.speed);
+      if (right) physics.heading -= TURN_RATE * speedFactor * highSpeedDamp * dt * Math.sign(physics.speed);
+
+      const dir = new THREE.Vector3(Math.sin(physics.heading), 0, Math.cos(physics.heading));
+      physics.position.addScaledVector(dir, physics.speed * dt);
+
+      resolveWallCollisions();
+
+      car.position.copy(physics.position);
+      car.rotation.y = physics.heading;
+    }
+
+    // ---------- Checkpoint Logic ----------
+    function updateCheckpoints(dt) {
+      const cp = checkpoints[currentCheckpoint];
+      const dist = physics.position.distanceTo(new THREE.Vector3(cp.x, 0, cp.z));
+
+      if (dist < cp.r) {
+        if (currentCheckpoint === 0) {
+          if (hasStartedLap) {
+            currentLapTime = (performance.now() - lapStartTime) / 1000;
+            if (bestLapTime === null || currentLapTime < bestLapTime) {
+              bestLapTime = currentLapTime;
+              document.getElementById('best-time').textContent = bestLapTime.toFixed(2);
+            }
+          }
+          hasStartedLap = true;
+          lapStartTime = performance.now();
+        }
+
+        currentCheckpoint = (currentCheckpoint + 1) % checkpoints.length;
+        cpVisuals.forEach((v, i) => {
+          v.material.color.set(i === currentCheckpoint ? 0x00ff00 : (i === 0 ? 0xffaa00 : 0x00aaff));
+        });
+        document.getElementById('cp-count').textContent = 
+          currentCheckpoint === 0 ? "Start Line" : `Checkpoint ${currentCheckpoint}`;
+      }
+
+      if (hasStartedLap) {
+        currentLapTime = (performance.now() - lapStartTime) / 1000;
+      }
+    }
+
+    // ---------- Chase camera ----------
+    const camTarget = new THREE.Vector3();
+    const camDesired = new THREE.Vector3();
+    const CAM_DISTANCE = 8;
+    const CAM_HEIGHT   = 4;
+    const CAM_LERP     = 5; 
+
+    function updateCamera(dt) {
+      const behind = new THREE.Vector3(-Math.sin(physics.heading), 0, -Math.cos(physics.heading));
+      camDesired.copy(physics.position).addScaledVector(behind, CAM_DISTANCE).add(new THREE.Vector3(0, CAM_HEIGHT, 0));
+      const t = 1 - Math.exp(-CAM_LERP * dt); 
+      camera.position.lerp(camDesired, t);
+      camTarget.copy(physics.position).add(new THREE.Vector3(0, 1, 0));
+      camera.lookAt(camTarget);
+    }
+
+    // ---------- HUD ----------
+    const speedEl = document.getElementById('speed');
+    const lapTimeEl = document.getElementById('lap-time');
+    const warningEl = document.getElementById('offroad-warning');
+
+    function updateHUD() {
+      speedEl.textContent = Math.round(Math.abs(physics.speed) * 3.6);
+      lapTimeEl.textContent = currentLapTime.toFixed(2);
+      warningEl.style.display = physics.isOffroad ? 'block' : 'none';
+    }
+
+    // ---------- Loop ----------
+    const clock = new THREE.Clock();
+    function animate() {
+      const dt = Math.min(clock.getDelta(), 0.05);
+      updatePhysics(dt);
+      updateCheckpoints(dt);
+      updateCamera(dt);
+      updateHUD();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
